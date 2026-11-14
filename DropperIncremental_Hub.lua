@@ -105,7 +105,7 @@ local State = {
     -- Main & Farm
     AutoDropper = false,
     AutoBronzeDropper = false,
-    AutoCollectCoins = true,
+    AutoCollectCoins = false,
     AutoClaimDaily = false,
     AutoClaimQuests = false,
     AutoClaimAchievements = false,
@@ -1447,16 +1447,15 @@ task.spawn(function()
     end
 end)
 
--- 2. DUAL-ENGINE TRUE INFINITE-RANGE AUTO COIN & VACUUM (Works from any distance & any world!)
+-- 2. FIXED INFINITE-RANGE AUTO COIN / PART VACUUM
 task.spawn(function()
-    local lastServerSync = 0
     while ScreenGui.Parent do
         if State.AutoCollectCoins then
             pcall(function()
                 local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
                 local spawned = MapEssentials:FindFirstChild("Spawned")
                 
-                -- Expand internal RangeObject
+                -- Expand internal RangeObject so game radius checks don't block
                 local ro = MapEssentials:FindFirstChild("RangeObject")
                 if ro and hrp then
                     local myRange = ro:FindFirstChild(LocalPlayer.Name .. "'s range")
@@ -1465,38 +1464,25 @@ task.spawn(function()
                     end
                 end
 
-                -- Engine A: Local Visual Vacuum (Collects parts in workspace and brings them to player)
-                if spawned then
+                if hrp and spawned then
                     local children = spawned:GetChildren()
                     for i = 1, #children do
                         local part = children[i]
                         if part:IsA("BasePart") and not part:GetAttribute("PickedUp") then
                             part:SetAttribute("PickedUp", true)
+                            -- Fire both single and multi-collect remotes for 100% guarantee
                             Remotes.CollectPart:FireServer(part.Name)
                             Remotes.CollectPart:FireServer(part.Name, true)
-                            if hrp then
-                                part.CFrame = hrp.CFrame
-                            end
-                            part.Transparency = 0.7
+                            
+                            -- Bring to player position & clean up locally so no ghost coins remain
+                            part.CFrame = hrp.CFrame
+                            task.spawn(function()
+                                part.Transparency = 1
+                                task.wait(0.08)
+                                part:Destroy()
+                            end)
                         end
                     end
-                end
-
-                -- Engine B: Server Master Sync (Sweeps all server-spawned coins directly every 0.35s)
-                local now = os.clock()
-                if now - lastServerSync >= 0.35 then
-                    lastServerSync = now
-                    task.spawn(function()
-                        pcall(function()
-                            local active = Remotes.Collectible:InvokeServer()
-                            if type(active) == "table" then
-                                for coinId, _ in pairs(active) do
-                                    Remotes.CollectPart:FireServer(coinId)
-                                    Remotes.CollectPart:FireServer(coinId, true)
-                                end
-                            end
-                        end)
-                    end)
                 end
             end)
         end
