@@ -105,7 +105,7 @@ local State = {
     -- Main & Farm
     AutoDropper = false,
     AutoBronzeDropper = false,
-    AutoCollectCoins = false,
+    AutoCollectCoins = true,
     AutoClaimDaily = false,
     AutoClaimQuests = false,
     AutoClaimAchievements = false,
@@ -119,6 +119,7 @@ local State = {
     AutoDiamondsUpgrades = false,
     AutoCoinsUpgrades = false,
     AutoOtherCurrenciesUpgrades = false,
+    AutoReadingUpgrades = false,
     AutoTreeUpgrades = false,
     AutoDailyUpgrades = false,
     
@@ -1018,12 +1019,56 @@ end)
 -- BUILD TABS & COMPREHENSIVE AUTO SYSTEMS
 -- ═══════════════════════════════════════════════════════════
 
--- All 18 Upgrade Categories in Game
-local ALL_UPGRADE_CATEGORIES = {
-    "Cash", "RebirthPoints", "Bronze", "BronzeRebirthPoints", "Diamonds",
-    "Produce", "Grain", "Paper", "Coins", "Amber", "Bones", "DarkMatter",
-    "Gravitons", "Ingots", "Pearls", "Rocks", "Scrap", "Stardust"
-}
+-- Dynamic Upgrades Engine (Loaded from ReplicatedStorage Shared Modules)
+local SharedModules = ReplicatedStorage:WaitForChild("Modules", 10):WaitForChild("Shared", 10)
+local UpgradesModule = SharedModules:WaitForChild("Upgrades", 10)
+local DailyUpgradesModule = SharedModules:WaitForChild("DailyUpgrades", 10)
+local UpgradeTreeModule = SharedModules:WaitForChild("UpgradeTree", 10)
+local ReadingUpgradesModule = SharedModules:WaitForChild("ReadingUpgrades", 10)
+
+local UpgradesData = {}
+pcall(function() UpgradesData = require(UpgradesModule) end)
+
+local DailyUpgradesData = {}
+pcall(function() DailyUpgradesData = require(DailyUpgradesModule) end)
+
+local UpgradeTreeData = {}
+pcall(function() UpgradeTreeData = require(UpgradeTreeModule) end)
+
+local ReadingUpgradesData = {}
+pcall(function() ReadingUpgradesData = require(ReadingUpgradesModule) end)
+
+-- Pre-indexed upgrade key tables for zero overhead during execution
+local CategoryKeys = {}
+for cat, info in pairs(UpgradesData) do
+    if type(info) == "table" and type(info.Upgrades) == "table" then
+        CategoryKeys[cat] = {}
+        for upKey, _ in pairs(info.Upgrades) do
+            table.insert(CategoryKeys[cat], upKey)
+        end
+    end
+end
+
+local DailyKeys = {}
+if type(DailyUpgradesData) == "table" and type(DailyUpgradesData.Upgrades) == "table" then
+    for k, _ in pairs(DailyUpgradesData.Upgrades) do
+        table.insert(DailyKeys, k)
+    end
+end
+
+local TreeKeys = {}
+if type(UpgradeTreeData) == "table" then
+    for k, _ in pairs(UpgradeTreeData) do
+        table.insert(TreeKeys, k)
+    end
+end
+
+local ReadingKeys = {}
+if type(ReadingUpgradesData) == "table" and type(ReadingUpgradesData.Upgrades) == "table" then
+    for k, _ in pairs(ReadingUpgradesData.Upgrades) do
+        table.insert(ReadingKeys, k)
+    end
+end
 
 -- TAB 1: 🏠 Main (Dropper & Coin Farm)
 local tabMain = RegisterTab("Main", "🏠", 1)
@@ -1060,22 +1105,36 @@ CreateSlider(secAutoDrop, "Dropper Click Delay", "⏱️", 0.01, 0.5, State.Clic
     State.ClickDelay = val
 end)
 
--- TAB 2: ⚡ Auto Upgrades (Complete Coverage!)
+-- TAB 2: ⚡ Auto Upgrades (Complete Dynamic Coverage!)
 local tabUpgrades = RegisterTab("Upgrades", "⚡", 2)
 local secMasterUp = CreateSection(tabUpgrades, "Master Auto Upgrades", "🌟")
 
-CreateToggle(secMasterUp, "⚡ Auto Buy ALL 18 Categories (Max)", "👑", State.AutoBuyAllUpgrades, function(val)
+CreateToggle(secMasterUp, "⚡ Auto Buy ALL Categories (Max)", "👑", State.AutoBuyAllUpgrades, function(val)
     State.AutoBuyAllUpgrades = val
     SendToast(val and "Master Auto Upgrades: ALL ACTIVE" or "Master Auto Upgrades: OFF", val and "Success" or "Warning")
 end)
 
-CreateButton(secMasterUp, "Buy Max All 18 Categories Once", "💥", function()
-    for _, cat in ipairs(ALL_UPGRADE_CATEGORIES) do
-        for i = 1, 10 do
-            pcall(function() Remotes.Upgrade:FireServer(cat, i, true) end)
+CreateButton(secMasterUp, "Buy Max All Categories Once", "💥", function()
+    local totalBought = 0
+    for cat, keys in pairs(CategoryKeys) do
+        for _, upKey in ipairs(keys) do
+            pcall(function()
+                Remotes.Upgrade:FireServer(cat, upKey, true)
+                Remotes.Upgrade:FireServer(cat, upKey, false)
+            end)
+            totalBought = totalBought + 1
         end
     end
-    SendToast("Upgraded Max on all 18 categories!", "Success")
+    for _, k in ipairs(DailyKeys) do
+        pcall(function() Remotes.DailyUpgrade:FireServer(k) end)
+    end
+    for _, k in ipairs(TreeKeys) do
+        pcall(function() Remotes.TreeUpgrade:FireServer(k) end)
+    end
+    for _, k in ipairs(ReadingKeys) do
+        pcall(function() Remotes.DepositUpgrade:FireServer(k) end)
+    end
+    SendToast("Upgraded Max on all boards & trees!", "Success")
 end)
 
 local secIndUp = CreateSection(tabUpgrades, "Specific Currency Upgrades", "🛒")
@@ -1102,6 +1161,10 @@ end)
 
 CreateToggle(secIndUp, "Auto Other Currencies (Produce, Grain, etc.)", "🌾", State.AutoOtherCurrenciesUpgrades, function(val)
     State.AutoOtherCurrenciesUpgrades = val
+end)
+
+CreateToggle(secIndUp, "Auto Reading Upgrades", "📖", State.AutoReadingUpgrades, function(val)
+    State.AutoReadingUpgrades = val
 end)
 
 CreateToggle(secIndUp, "Auto Tree Upgrades", "🌳", State.AutoTreeUpgrades, function(val)
@@ -1384,15 +1447,16 @@ task.spawn(function()
     end
 end)
 
--- 2. FIXED INFINITE-RANGE AUTO COIN / PART VACUUM
+-- 2. DUAL-ENGINE TRUE INFINITE-RANGE AUTO COIN & VACUUM (Works from any distance & any world!)
 task.spawn(function()
+    local lastServerSync = 0
     while ScreenGui.Parent do
         if State.AutoCollectCoins then
             pcall(function()
                 local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
                 local spawned = MapEssentials:FindFirstChild("Spawned")
                 
-                -- Expand internal RangeObject so game radius checks don't block
+                -- Expand internal RangeObject
                 local ro = MapEssentials:FindFirstChild("RangeObject")
                 if ro and hrp then
                     local myRange = ro:FindFirstChild(LocalPlayer.Name .. "'s range")
@@ -1401,25 +1465,38 @@ task.spawn(function()
                     end
                 end
 
-                if hrp and spawned then
+                -- Engine A: Local Visual Vacuum (Collects parts in workspace and brings them to player)
+                if spawned then
                     local children = spawned:GetChildren()
                     for i = 1, #children do
                         local part = children[i]
                         if part:IsA("BasePart") and not part:GetAttribute("PickedUp") then
                             part:SetAttribute("PickedUp", true)
-                            -- Fire both single and multi-collect remotes for 100% guarantee
                             Remotes.CollectPart:FireServer(part.Name)
                             Remotes.CollectPart:FireServer(part.Name, true)
-                            
-                            -- Bring to player position & clean up locally so no ghost coins remain
-                            part.CFrame = hrp.CFrame
-                            task.spawn(function()
-                                part.Transparency = 1
-                                task.wait(0.08)
-                                part:Destroy()
-                            end)
+                            if hrp then
+                                part.CFrame = hrp.CFrame
+                            end
+                            part.Transparency = 0.7
                         end
                     end
+                end
+
+                -- Engine B: Server Master Sync (Sweeps all server-spawned coins directly every 0.35s)
+                local now = os.clock()
+                if now - lastServerSync >= 0.35 then
+                    lastServerSync = now
+                    task.spawn(function()
+                        pcall(function()
+                            local active = Remotes.Collectible:InvokeServer()
+                            if type(active) == "table" then
+                                for coinId, _ in pairs(active) do
+                                    Remotes.CollectPart:FireServer(coinId)
+                                    Remotes.CollectPart:FireServer(coinId, true)
+                                end
+                            end
+                        end)
+                    end)
                 end
             end)
         end
@@ -1427,70 +1504,112 @@ task.spawn(function()
     end
 end)
 
--- 3. Comprehensive Auto Upgrades Loop (All 18 Categories + Tree + Daily)
+-- 3. Comprehensive Auto Upgrades Loop (All 18 Categories + Tree + Daily + Reading)
 task.spawn(function()
     while ScreenGui.Parent do
         -- Master Auto Buy All
         if State.AutoBuyAllUpgrades then
             pcall(function()
-                for _, cat in ipairs(ALL_UPGRADE_CATEGORIES) do
-                    for i = 1, 10 do
-                        Remotes.Upgrade:FireServer(cat, i, true)
+                for cat, keys in pairs(CategoryKeys) do
+                    for _, upKey in ipairs(keys) do
+                        Remotes.Upgrade:FireServer(cat, upKey, true)
+                        Remotes.Upgrade:FireServer(cat, upKey, false)
                     end
+                end
+                for _, k in ipairs(DailyKeys) do
+                    Remotes.DailyUpgrade:FireServer(k)
+                end
+                for _, k in ipairs(TreeKeys) do
+                    Remotes.TreeUpgrade:FireServer(k)
+                end
+                for _, k in ipairs(ReadingKeys) do
+                    Remotes.DepositUpgrade:FireServer(k)
                 end
             end)
         else
             -- Individual Category Upgrades
-            if State.AutoCashUpgrades then
+            if State.AutoCashUpgrades and CategoryKeys["Cash"] then
                 pcall(function()
-                    for i = 1, 10 do Remotes.Upgrade:FireServer("Cash", i, true) end
+                    for _, upKey in ipairs(CategoryKeys["Cash"]) do
+                        Remotes.Upgrade:FireServer("Cash", upKey, true)
+                        Remotes.Upgrade:FireServer("Cash", upKey, false)
+                    end
                 end)
             end
-            if State.AutoRebirthUpgrades then
+            if State.AutoRebirthUpgrades and CategoryKeys["RebirthPoints"] then
                 pcall(function()
-                    for i = 1, 10 do Remotes.Upgrade:FireServer("RebirthPoints", i, true) end
+                    for _, upKey in ipairs(CategoryKeys["RebirthPoints"]) do
+                        Remotes.Upgrade:FireServer("RebirthPoints", upKey, true)
+                        Remotes.Upgrade:FireServer("RebirthPoints", upKey, false)
+                    end
                 end)
             end
             if State.AutoBronzeUpgrades then
                 pcall(function()
-                    for i = 1, 10 do Remotes.Upgrade:FireServer("Bronze", i, true) end
-                    for i = 1, 10 do Remotes.Upgrade:FireServer("BronzeRebirthPoints", i, true) end
+                    if CategoryKeys["Bronze"] then
+                        for _, upKey in ipairs(CategoryKeys["Bronze"]) do
+                            Remotes.Upgrade:FireServer("Bronze", upKey, true)
+                            Remotes.Upgrade:FireServer("Bronze", upKey, false)
+                        end
+                    end
+                    if CategoryKeys["BronzeRebirthPoints"] then
+                        for _, upKey in ipairs(CategoryKeys["BronzeRebirthPoints"]) do
+                            Remotes.Upgrade:FireServer("BronzeRebirthPoints", upKey, true)
+                            Remotes.Upgrade:FireServer("BronzeRebirthPoints", upKey, false)
+                        end
+                    end
                 end)
             end
-            if State.AutoDiamondsUpgrades then
+            if State.AutoDiamondsUpgrades and CategoryKeys["Diamonds"] then
                 pcall(function()
-                    for i = 1, 10 do Remotes.Upgrade:FireServer("Diamonds", i, true) end
+                    for _, upKey in ipairs(CategoryKeys["Diamonds"]) do
+                        Remotes.Upgrade:FireServer("Diamonds", upKey, true)
+                        Remotes.Upgrade:FireServer("Diamonds", upKey, false)
+                    end
                 end)
             end
-            if State.AutoCoinsUpgrades then
+            if State.AutoCoinsUpgrades and CategoryKeys["Coins"] then
                 pcall(function()
-                    for i = 1, 10 do Remotes.Upgrade:FireServer("Coins", i, true) end
+                    for _, upKey in ipairs(CategoryKeys["Coins"]) do
+                        Remotes.Upgrade:FireServer("Coins", upKey, true)
+                        Remotes.Upgrade:FireServer("Coins", upKey, false)
+                    end
                 end)
             end
             if State.AutoOtherCurrenciesUpgrades then
                 pcall(function()
                     local others = {"Produce", "Grain", "Paper", "Rocks", "Scrap", "Bones", "Amber", "DarkMatter", "Gravitons", "Ingots", "Pearls", "Stardust"}
                     for _, cat in ipairs(others) do
-                        for i = 1, 10 do Remotes.Upgrade:FireServer(cat, i, true) end
+                        if CategoryKeys[cat] then
+                            for _, upKey in ipairs(CategoryKeys[cat]) do
+                                Remotes.Upgrade:FireServer(cat, upKey, true)
+                                Remotes.Upgrade:FireServer(cat, upKey, false)
+                            end
+                        end
                     end
                 end)
             end
-        end
-
-        -- Tree & Daily Upgrades
-        if State.AutoTreeUpgrades then
-            pcall(function()
-                for i = 1, 15 do
-                    Remotes.TreeUpgrade:FireServer("Upgrade" .. i)
-                end
-            end)
-        end
-        if State.AutoDailyUpgrades then
-            pcall(function()
-                for i = 1, 15 do
-                    Remotes.DailyUpgrade:FireServer("Upgrade" .. i)
-                end
-            end)
+            if State.AutoReadingUpgrades then
+                pcall(function()
+                    for _, k in ipairs(ReadingKeys) do
+                        Remotes.DepositUpgrade:FireServer(k)
+                    end
+                end)
+            end
+            if State.AutoTreeUpgrades then
+                pcall(function()
+                    for _, k in ipairs(TreeKeys) do
+                        Remotes.TreeUpgrade:FireServer(k)
+                    end
+                end)
+            end
+            if State.AutoDailyUpgrades then
+                pcall(function()
+                    for _, k in ipairs(DailyKeys) do
+                        Remotes.DailyUpgrade:FireServer(k)
+                    end
+                end)
+            end
         end
 
         task.wait(0.4)
