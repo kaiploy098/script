@@ -67,36 +67,43 @@ if PathTool and PathTool.FightUtil then
     end
 end
 
--- Hook Fast Open Hatch Animation & Result Handling
-if PathTool and PathTool.GambleShower then
-    local origOnResult = PathTool.GambleShower.OnGambleResult
-    PathTool.GambleShower.OnGambleResult = function(a1, a2)
-        if _G.WFS_FastOpenEgg then
-            pcall(function()
-                PathTool.ViewUtil.SetBlurActive("Gamble", nil, false)
-                PathTool.ViewManager.CloseView("GambleRewardUI")
-            end)
-            if a2 then a2() end
-            return
-        end
-        return origOnResult(a1, a2)
-    end
-end
-
+-- Hook Fast Open: Accelerate animation to 4x speed (playSpeed = 0.25) as GamePass does
+-- Preserves 100% of visual animation (egg shake, crack, reveal, light beams, sounds, rewards)
 if PathTool and PathTool.GambleCameraRewardAnim then
     local origShowReward = PathTool.GambleCameraRewardAnim.ShowReward
     PathTool.GambleCameraRewardAnim.ShowReward = function(model, rwdList, playSpeed, isAuto, gbId, mcIdx, a7, callback)
         if _G.WFS_FastOpenEgg then
-            pcall(function()
-                PathTool.ViewUtil.SetBlurActive("Gamble", nil, false)
-                PathTool.ViewManager.CloseView("GambleRewardUI")
-            end)
-            if callback then
-                task.spawn(callback, true)
-            end
-            return
+            -- 0.25 is 4x speed (compared to 1.0 default and 0.5 gamepass)
+            playSpeed = 0.25
         end
         return origShowReward(model, rwdList, playSpeed, isAuto, gbId, mcIdx, a7, callback)
+    end
+end
+
+if PathTool and PathTool.GambleRewardAnim and PathTool.GambleRewardAnim.ShowReward then
+    local origGRA = PathTool.GambleRewardAnim.ShowReward
+    PathTool.GambleRewardAnim.ShowReward = function(a1, a2, a3, ...)
+        if _G.WFS_FastOpenEgg then
+            a3 = 0.25
+        end
+        return origGRA(a1, a2, a3, ...)
+    end
+end
+
+-- Spoof GambleDoubleSpeed in client GamePass check when Fast Open is enabled
+if PathTool and PathTool.ClientPlayerManager then
+    local gp = PathTool.ClientPlayerManager.GetGamePlayer()
+    if gp and gp.GetGamePasses then
+        local gpObj = gp:GetGamePasses()
+        if gpObj then
+            local origHasGP = gpObj.HasGamePass
+            gpObj.HasGamePass = function(self, key)
+                if _G.WFS_FastOpenEgg and (key == PathTool.Constants.GamePassKey.GambleDoubleSpeed or key == "G3") then
+                    return true
+                end
+                return origHasGP(self, key)
+            end
+        end
     end
 end
 
@@ -133,8 +140,10 @@ end
 -- Helper: Teleport character to egg machine
 local function TeleportToEggMachine()
     local info = GetCurrentEggInfo()
-    if info and LocalPlayer.Character then
-        LocalPlayer.Character:PivotTo(CFrame.new(info.position + Vector3.new(0, 3, 5)))
+    local char = LocalPlayer.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    if info and hrp then
+        hrp.CFrame = CFrame.new(info.position + Vector3.new(0, 3, 5))
         return true
     end
     return false
@@ -145,26 +154,70 @@ local function TeleportToWorld(worldId)
     local fight = workspace:FindFirstChild("Fight")
     local spawns = fight and fight:FindFirstChild("Spawns")
     local spawnPart = spawns and spawns:FindFirstChild("Spawn_" .. tostring(worldId))
+    local char = LocalPlayer.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
 
-    if spawnPart and LocalPlayer.Character then
-        LocalPlayer.Character:PivotTo(spawnPart.CFrame + Vector3.new(0, 3, 0))
-        task.wait(0.1)
-
-        -- Secondary server notify
-        if PathTool and PathTool.TeleportSystem then
-            local gp = PathTool.ClientPlayerManager.GetGamePlayer()
-            local cArea = gp and gp:GetAreaId() or 1
-            local fromKey = (cArea == 1) and "1_1" or "2_2"
-            local toKey = PathTool.CfgTeleport and PathTool.CfgTeleport.AreaPos and PathTool.CfgTeleport.AreaPos[worldId]
-            if toKey then
-                pcall(function()
-                    PathTool.TeleportSystem.DoTeleport(fromKey, toKey, true)
-                end)
-            end
+    if spawnPart and hrp then
+        local gp = PathTool and PathTool.ClientPlayerManager.GetGamePlayer()
+        if gp then
+            pcall(function() gp:SetAreaId(worldId) end)
         end
+        if PathTool and PathTool.ListenUtil then
+            pcall(function() PathTool.ListenUtil.Execute("TeleportToArea", worldId) end)
+        end
+
+        hrp.CFrame = spawnPart.CFrame + Vector3.new(0, 3, 0)
         return true
     end
     return false
+end
+
+-- Helper: Do single or 3-egg hatch
+local function DoHatchOnce()
+    local info = GetCurrentEggInfo()
+    if not info then return false end
+    TeleportToEggMachine()
+    task.wait(0.25)
+
+    local gp = PathTool and PathTool.ClientPlayerManager.GetGamePlayer()
+    local batch = _G.WFS_MultiOpenCount or 1
+
+    if batch == 3 or batch == 999 then
+        local hasTreble = gp and gp.GetGamePasses and gp:GetGamePasses():HasGamePass(PathTool.Constants.GamePassKey.GambleTrebleBuy)
+        if hasTreble and PathTool.GambleShower and PathTool.GambleShower.JustDoIt then
+            pcall(function()
+                PathTool.GambleShower.JustDoIt()
+            end)
+        else
+            for i = 1, (hasTreble and 1 or 3) do
+                pcall(function()
+                    PathTool.GambleSystem.ClientDoGamble(info.key, info.id, 1, 1, false)
+                end)
+                if i < 3 then task.wait(2.6) end
+            end
+        end
+    else
+        local u51 = nil
+        local uvs = debug and debug.getupvalues and debug.getupvalues(PathTool.GambleShower.IsDoGuiShow)
+        if uvs then
+            for _, v in pairs(uvs) do
+                if type(v) == "table" and v.gbInfo then
+                    u51 = v
+                    break
+                end
+            end
+        end
+        if u51 and PathTool.ViewUtil and PathTool.GambleSystem then
+            pcall(function()
+                PathTool.ViewUtil.DoRequest(PathTool.GambleSystem.ClientDoGamble, u51.gbInfo.gbKey, u51.gbInfo.gbId, u51.mcIdx, 1, false)
+            end)
+        else
+            pcall(function()
+                PathTool.GambleSystem.ClientDoGamble(info.key, info.id, 1, 1, false)
+            end)
+        end
+    end
+    return true
 end
 
 -- ScreenGui
@@ -697,8 +750,8 @@ CreateSectionHeader(EggPage, "Animation & Speed", 1)
 
 CreateToggleCard(
     EggPage,
-    "⚡ Fast Open (Skip Animation)",
-    "Skips hatch cutscenes and camera tweens for instant 0-second opening",
+    "⚡ Fast Open (4x Speed Animation)",
+    "Accelerates egg cutscenes 4x (GamePass speedup) with full animation & sounds",
     _G.WFS_FastOpenEgg,
     function(val)
         _G.WFS_FastOpenEgg = val
@@ -801,12 +854,24 @@ CreateToggleCard(
 
 CreateActionCard(
     EggPage,
+    "🐣 Hatch Egg Now",
+    "Instantly opens current egg machine with selected amount (x1 or x3)",
+    "Hatch Now",
+    Theme.Accent,
+    function()
+        DoHatchOnce()
+    end,
+    7
+)
+
+CreateActionCard(
+    EggPage,
     "📍 Teleport to Egg Machine",
     "Moves player right in front of current area's egg machine",
     "Teleport",
-    Theme.Accent,
+    Theme.SurfaceDark,
     TeleportToEggMachine,
-    7
+    8
 )
 
 ---------------------------------------------------------
@@ -865,10 +930,10 @@ local function RefreshWorldsList()
     UserWorld.Text = "World " .. tostring(curArea)
 
     for i, teleKey in ipairs(PathTool.CfgTeleport.AreaPos) do
-        -- True unlock verification: World 1 is always unlocked. Others must have gp.teleport:IsTeleportOpen(teleKey)
+        -- True unlock verification: World 1 is always unlocked. Others must have gp.teleport:IsTeleportOpen(teleKey) or IsAreaOpen(i)
         local isUnlocked = (i == 1)
         if gp and gp.teleport and i > 1 then
-            isUnlocked = gp.teleport:IsTeleportOpen(teleKey)
+            isUnlocked = gp.teleport:IsTeleportOpen(teleKey) or gp.teleport:IsAreaOpen(i)
         end
 
         local worldName = "World " .. tostring(i)
@@ -1150,45 +1215,51 @@ task.spawn(function()
                 local char = LocalPlayer.Character
                 local hrp = char and char:FindFirstChild("HumanoidRootPart")
 
-                -- Ensure player is standing at egg machine
-                if hrp and (hrp.Position - info.position).Magnitude > 25 then
-                    char:PivotTo(CFrame.new(info.position + Vector3.new(0, 3, 5)))
+                -- Ensure player is standing right at egg machine
+                if hrp and (hrp.Position - info.position).Magnitude > 20 then
+                    hrp.CFrame = CFrame.new(info.position + Vector3.new(0, 3, 5))
                     task.wait(0.3)
                 end
 
                 local gp = PathTool.ClientPlayerManager.GetGamePlayer()
-                if gp and gp.gamble then
-                    gp.gamble.IsInCdTime = function() return false end
-                    gp.gamble.cdTime = 0
-                end
-                PathTool.GambleSystem._clientOnShowRes = false
+                local cdTime = (gp and gp.gamble and gp.gamble.cdTime) or 0
 
-                local batch = _G.WFS_MultiOpenCount or 1
-                if batch == 999 then
-                    -- Continuous fast loop
-                    pcall(function()
-                        PathTool.GambleSystem.ClientDoGamble(info.key, info.id, 1, 1, false)
-                    end)
-                    task.wait(0.6)
-                elseif batch > 1 then
-                    for i = 1, batch do
-                        if not _G.WFS_AutoHatch then break end
-                        if gp and gp.gamble then
-                            gp.gamble.IsInCdTime = function() return false end
-                            gp.gamble.cdTime = 0
+                if tick() >= cdTime then
+                    local batch = _G.WFS_MultiOpenCount or 1
+                    local hasTreble = gp and gp.GetGamePasses and gp:GetGamePasses():HasGamePass(PathTool.Constants.GamePassKey.GambleTrebleBuy)
+
+                    if batch == 3 then
+                        if hasTreble then
+                            pcall(function()
+                                PathTool.GambleSystem.ClientDoGamble(info.key, info.id, 1, 3, false)
+                            end)
+                            local waitTime = _G.WFS_FastOpenEgg and 2.6 or 5.2
+                            task.wait(waitTime)
+                        else
+                            for i = 1, 3 do
+                                if not _G.WFS_AutoHatch then break end
+                                pcall(function()
+                                    PathTool.GambleSystem.ClientDoGamble(info.key, info.id, 1, 1, false)
+                                end)
+                                task.wait(2.6)
+                            end
                         end
-                        PathTool.GambleSystem._clientOnShowRes = false
+                    elseif batch == 999 then
+                        local count = hasTreble and 3 or 1
+                        pcall(function()
+                            PathTool.GambleSystem.ClientDoGamble(info.key, info.id, 1, count, false)
+                        end)
+                        local waitTime = _G.WFS_FastOpenEgg and 2.6 or 5.2
+                        task.wait(waitTime)
+                    else
                         pcall(function()
                             PathTool.GambleSystem.ClientDoGamble(info.key, info.id, 1, 1, false)
                         end)
-                        task.wait(0.6)
+                        local waitTime = _G.WFS_FastOpenEgg and 2.6 or 5.2
+                        task.wait(waitTime)
                     end
-                    task.wait(0.5)
                 else
-                    pcall(function()
-                        PathTool.GambleSystem.ClientDoGamble(info.key, info.id, 1, 1, false)
-                    end)
-                    task.wait(0.8)
+                    task.wait(0.2)
                 end
             else
                 task.wait(1)
