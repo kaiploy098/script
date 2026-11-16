@@ -54,6 +54,7 @@ local AimAssistController = Controllers and require(Controllers:WaitForChild("Ai
 local GunOrbitController = Controllers and require(Controllers:WaitForChild("GunOrbitController", 5))
 local GunView = Controllers and require(Controllers:WaitForChild("GunView", 5))
 local AmmoController = Controllers and require(Controllers:WaitForChild("AmmoController", 5))
+local LootController = Controllers and require(Controllers:WaitForChild("LootController", 5))
 
 -- 360° Silent Aim & Headlock Hooks
 local origGunViewAligned = GunView and GunView.Aligned
@@ -96,6 +97,7 @@ if AimAssistController then
 end
 
 local RequestCollect = Remotes and Remotes:FindFirstChild("RequestCollect")
+local RequestSell = Remotes and Remotes:FindFirstChild("RequestSell")
 local RequestForge = Remotes and Remotes:FindFirstChild("RequestForge")
 local RequestUpgrade = Remotes and Remotes:FindFirstChild("RequestUpgrade")
 local RequestRebirth = Remotes and Remotes:FindFirstChild("RequestRebirth")
@@ -106,6 +108,41 @@ local RequestBarrelSpin = Remotes and Remotes:FindFirstChild("RequestBarrelSpin"
 local RequestCode = Remotes and Remotes:FindFirstChild("RequestCode")
 local RequestReturnHub = Remotes and Remotes:FindFirstChild("RequestReturnHub")
 local RequestStageWarp = Remotes and Remotes:FindFirstChild("RequestStageWarp")
+
+-- Scrap & Bag State Helpers
+local function GetCarriedScrapCount()
+    local data = ClientState and ClientState.Data
+    local carried = data and data.CarriedScrap
+    local count = 0
+    if carried and type(carried) == "table" then
+        for _, v in pairs(carried) do
+            if type(v) == "number" then
+                count = count + v
+            end
+        end
+    end
+    return count
+end
+
+local function GetCarryCap()
+    local data = ClientState and ClientState.Data
+    local derived = data and data.Derived
+    return (derived and derived.CarryCap) or 50
+end
+
+local function IsBagFull()
+    local cap = GetCarryCap()
+    if cap <= 0 then return false end
+    return GetCarriedScrapCount() >= math.max(1, cap - 2)
+end
+
+local function SellAllScrap()
+    if RequestSell then
+        RequestSell:FireServer(nil)
+        return true
+    end
+    return false
+end
 
 -- Helper Functions
 local function GetStageFloor(stageNum)
@@ -1352,60 +1389,139 @@ end)
 
 -- TAB 3: 🧲 Scrap & Loot
 local PageLoot = CreateTab("Scrap & Loot", "🧲", 3)
-CreateSection(PageLoot, "Instant Scrap Harvester", "💎")
+CreateSection(PageLoot, "Scrap Harvester & Auto Sell", "💎")
 
 local AutoCollectActive = true
-local MagnetActive = true
+local AutoSellActive = true
+local ScrapMagnetActive = true
+local RecentlyCollected = {}
 
-CreateToggle(PageLoot, "Auto Collect All Scrap", "✨", true, function(enabled)
+CreateToggle(PageLoot, "Auto Collect Scrap", "✨", true, function(enabled)
     AutoCollectActive = enabled
-    if enabled then Notify("Auto Collect Scrap: ACTIVE", "✨", Color3.fromRGB(120, 240, 140)) end
+    if enabled then Notify("Auto Collect: ACTIVE", "✨", Color3.fromRGB(120, 240, 140)) end
 end)
 
-CreateToggle(PageLoot, "Scrap Magnet (Pull to Player)", "🧲", true, function(enabled)
-    MagnetActive = enabled
+CreateToggle(PageLoot, "Auto Sell When Bag Full", "💰", true, function(enabled)
+    AutoSellActive = enabled
+    if enabled then Notify("Auto Sell Scrap: ACTIVE", "💰", Color3.fromRGB(120, 240, 140)) end
 end)
 
-CreateButton(PageLoot, "Harvest Current Drops Once", "⚡", function()
+CreateToggle(PageLoot, "Instant Prompt & Magnet", "🧲", true, function(enabled)
+    ScrapMagnetActive = enabled
+end)
+
+CreateButton(PageLoot, "⚡ Sweep Harvest (All Drops)", "⚡", function()
     local count = 0
-    pcall(function()
-        local scrapFolder = Workspace:FindFirstChild("ScrapDrops")
-        if scrapFolder and RequestCollect then
-            for _, drop in ipairs(scrapFolder:GetChildren()) do
-                local id = drop:GetAttribute("DropId")
-                if id then
-                    RequestCollect:FireServer(id)
-                    count = count + 1
-                end
+    local scrapFolder = Workspace:FindFirstChild("ScrapDrops")
+    local char = LocalPlayer.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    if not (scrapFolder and hrp) then
+        Notify("No scrap drops or character found", "❌", Color3.fromRGB(255, 100, 100))
+        return
+    end
+
+    local origCFrame = hrp.CFrame
+    local drops = scrapFolder:GetChildren()
+
+    for _, drop in ipairs(drops) do
+        local id = drop:GetAttribute("DropId")
+        if id and drop:IsA("BasePart") then
+            if IsBagFull() then
+                SellAllScrap()
+                task.wait(0.12)
             end
+            hrp.CFrame = CFrame.new(drop.Position + Vector3.new(0, 3, 0))
+            if LootController and typeof(LootController.Collect) == "function" then
+                pcall(function() LootController.Collect(id) end)
+            elseif RequestCollect then
+                RequestCollect:FireServer(id)
+            end
+            local prompt = drop:FindFirstChild("FxPrompt")
+            if prompt and typeof(fireproximityprompt) == "function" then
+                pcall(fireproximityprompt, prompt)
+            end
+            count = count + 1
+            task.wait(0.04)
         end
-    end)
+    end
+
+    hrp.CFrame = origCFrame
     Notify("Harvested " .. count .. " drops!", "💎", Color3.fromRGB(120, 240, 140))
 end)
 
--- Harvester Background Loop
+CreateButton(PageLoot, "💰 Instant Sell All Carried Scrap", "💰", function()
+    local carried = GetCarriedScrapCount()
+    if SellAllScrap() then
+        Notify("Sold " .. carried .. " scrap!", "💰", Color3.fromRGB(120, 240, 140))
+    else
+        Notify("RequestSell Remote not found", "❌", Color3.fromRGB(255, 100, 100))
+    end
+end)
+
+CreateButton(PageLoot, "📦 Check Bag Capacity", "📊", function()
+    local count = GetCarriedScrapCount()
+    local cap = GetCarryCap()
+    local pct = cap > 0 and math.floor((count / cap) * 100) or 0
+    Notify("Bag: " .. count .. "/" .. cap .. " (" .. pct .. "%)", "📦", Color3.fromRGB(255, 220, 120))
+end)
+
+-- Harvester Background Loop (Rate-limit safe + Auto Sell aware)
 task.spawn(function()
     while Hub.Active do
-        task.wait(0.12)
-        if AutoCollectActive or MagnetActive then
-            pcall(function()
-                local scrapFolder = Workspace:FindFirstChild("ScrapDrops")
-                local char = LocalPlayer.Character
-                local hrp = char and char:FindFirstChild("HumanoidRootPart")
+        task.wait(0.2)
+        pcall(function()
+            -- 1. Auto Sell if bag is near capacity so collections never lock
+            if AutoSellActive and IsBagFull() then
+                SellAllScrap()
+                task.wait(0.15)
+            end
 
-                if scrapFolder then
-                    for _, drop in ipairs(scrapFolder:GetChildren()) do
-                        local dropId = drop:GetAttribute("DropId")
-                        if AutoCollectActive and dropId and RequestCollect then
+            local scrapFolder = Workspace:FindFirstChild("ScrapDrops")
+            if not scrapFolder then return end
+
+            local now = os.clock()
+            for id, t in pairs(RecentlyCollected) do
+                if now - t > 3.5 then
+                    RecentlyCollected[id] = nil
+                end
+            end
+
+            local drops = scrapFolder:GetChildren()
+            local collectedThisTick = 0
+            local maxPerTick = 4 -- Server RateLimit safe (Per 8, Burst 12)
+
+            for _, drop in ipairs(drops) do
+                local dropId = drop:GetAttribute("DropId")
+
+                -- Magnet / Instant Prompt optimization
+                if ScrapMagnetActive then
+                    local prompt = drop:FindFirstChild("FxPrompt")
+                    if prompt and prompt:IsA("ProximityPrompt") then
+                        prompt.HoldDuration = 0
+                        prompt.MaxActivationDistance = 200
+                        prompt.RequiresLineOfSight = false
+                    end
+                end
+
+                if AutoCollectActive and dropId then
+                    if not RecentlyCollected[dropId] and collectedThisTick < maxPerTick then
+                        RecentlyCollected[dropId] = now
+                        collectedThisTick = collectedThisTick + 1
+
+                        if LootController and typeof(LootController.Collect) == "function" then
+                            pcall(function() LootController.Collect(dropId) end)
+                        elseif RequestCollect then
                             RequestCollect:FireServer(dropId)
                         end
-                        if MagnetActive and hrp and drop:IsA("BasePart") then
-                            drop.CFrame = hrp.CFrame
+
+                        local prompt = drop:FindFirstChild("FxPrompt")
+                        if prompt and typeof(fireproximityprompt) == "function" then
+                            pcall(fireproximityprompt, prompt)
                         end
                     end
                 end
-            end)
-        end
+            end
+        end)
     end
 end)
 
