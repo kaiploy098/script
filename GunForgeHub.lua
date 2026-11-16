@@ -11,7 +11,7 @@
     - 🗺️ Manual Stage Teleporter (Stages 1-69)
     - 🔨 Auto Forge & Gun Upgrades
     - 🎁 Auto Claim Free Gifts & Wheel Spins
-    - 🏃 Movement Mods (Speed, Jump, Inf Jump, Noclip)
+    - 👤 Player Mods (Speed, Jump, Inf Jump, Fly, Noclip, Invisibility)
     - 👁️ Visuals & ESP (Chams Highlight, Fullbright, FOV)
     - 🎨 5 Aesthetic Themes + Mobile Floating Button
     ═══════════════════════════════════════════════════════════════
@@ -26,6 +26,7 @@ local Hub = {
     Connections = {},
     Loops = {},
     ESPObjects = {},
+    Cleanups = {},
     Active = true
 }
 _G.GunForgeHub = Hub
@@ -253,6 +254,11 @@ function Hub:Destroy()
     _G.GunForgeHub_AutoShootActive = false
     LockedTargetData = nil
     RestoreSilentAimHooks()
+    if Hub.Cleanups then
+        for _, cleanup in ipairs(Hub.Cleanups) do
+            pcall(cleanup)
+        end
+    end
     if FireController then
         pcall(function()
             FireController.SetHolding(false)
@@ -1610,21 +1616,24 @@ task.spawn(function()
     end
 end)
 
--- TAB 6: 🏃 Movement
-local PageMove = CreateTab("Movement", "🏃", 6)
-CreateSection(PageMove, "Player Physics & Speed", "⚡")
+-- TAB 6: 👤 Player
+local PagePlayer = CreateTab("Player", "👤", 6)
+CreateSection(PagePlayer, "Movement & Physics", "🏃")
 
 local InfJumpActive = false
 local NoclipActive = false
+local FlyActive = false
+local FlySpeed = 50
+local InvisActive = false
 
-CreateSlider(PageMove, "Walk Speed", "👟", 16, 200, 16, "", function(val)
+CreateSlider(PagePlayer, "Walk Speed", "👟", 16, 250, 16, "", function(val)
     pcall(function()
         local hum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
         if hum then hum.WalkSpeed = val end
     end)
 end)
 
-CreateSlider(PageMove, "Jump Power", "🦘", 50, 300, 50, "", function(val)
+CreateSlider(PagePlayer, "Jump Power", "🦘", 50, 350, 50, "", function(val)
     pcall(function()
         local hum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
         if hum then
@@ -1634,16 +1643,225 @@ CreateSlider(PageMove, "Jump Power", "🦘", 50, 300, 50, "", function(val)
     end)
 end)
 
-CreateToggle(PageMove, "Infinite Jump", "🪽", false, function(enabled)
+CreateToggle(PagePlayer, "Infinite Jump", "🪽", false, function(enabled)
     InfJumpActive = enabled
     if enabled then Notify("Infinite Jump: ON", "🪽") end
 end)
 
-CreateToggle(PageMove, "Noclip", "👻", false, function(enabled)
-    NoclipActive = enabled
-    if enabled then Notify("Noclip: ON", "👻") end
+CreateSection(PagePlayer, "Flight & Noclip", "🕊️")
+
+-- Fly Implementation (Smooth Physics Velocity & Orientation)
+local flyBodyVel = nil
+local flyBodyGyro = nil
+local flyConn = nil
+
+local function StopFly()
+    if flyConn then
+        flyConn:Disconnect()
+        flyConn = nil
+    end
+    if flyBodyVel then
+        pcall(function() flyBodyVel:Destroy() end)
+        flyBodyVel = nil
+    end
+    if flyBodyGyro then
+        pcall(function() flyBodyGyro:Destroy() end)
+        flyBodyGyro = nil
+    end
+    local hum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+    if hum then
+        hum.PlatformStanding = false
+        pcall(function() hum:ChangeState(Enum.HumanoidStateType.GettingUp) end)
+    end
+end
+
+local function StartFly()
+    local char = LocalPlayer.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if not (char and hrp and hum) then return end
+
+    StopFly()
+
+    flyBodyVel = Instance.new("BodyVelocity")
+    flyBodyVel.Name = "GunForgeHub_FlyVel"
+    flyBodyVel.MaxForce = Vector3.new(1e6, 1e6, 1e6)
+    flyBodyVel.Velocity = Vector3.zero
+    flyBodyVel.Parent = hrp
+
+    flyBodyGyro = Instance.new("BodyGyro")
+    flyBodyGyro.Name = "GunForgeHub_FlyGyro"
+    flyBodyGyro.MaxTorque = Vector3.new(1e6, 1e6, 1e6)
+    flyBodyGyro.CFrame = hrp.CFrame
+    flyBodyGyro.Parent = hrp
+
+    hum.PlatformStanding = true
+
+    flyConn = RunService.RenderStepped:Connect(function()
+        if not FlyActive or not Hub.Active then return end
+        local c = LocalPlayer.Character
+        local root = c and c:FindFirstChild("HumanoidRootPart")
+        local h = c and c:FindFirstChildOfClass("Humanoid")
+        if not (c and root and h and flyBodyVel and flyBodyGyro and flyBodyVel.Parent and flyBodyGyro.Parent) then return end
+
+        h.PlatformStanding = true
+
+        local cam = Workspace.CurrentCamera
+        local moveDir = Vector3.zero
+
+        -- Keyboard Controls
+        if UserInputService:IsKeyDown(Enum.KeyCode.W) then moveDir = moveDir + cam.CFrame.LookVector end
+        if UserInputService:IsKeyDown(Enum.KeyCode.S) then moveDir = moveDir - cam.CFrame.LookVector end
+        if UserInputService:IsKeyDown(Enum.KeyCode.A) then moveDir = moveDir - cam.CFrame.RightVector end
+        if UserInputService:IsKeyDown(Enum.KeyCode.D) then moveDir = moveDir + cam.CFrame.RightVector end
+        if UserInputService:IsKeyDown(Enum.KeyCode.Space) then moveDir = moveDir + Vector3.new(0, 1, 0) end
+        if UserInputService:IsKeyDown(Enum.KeyCode.LeftShift) or UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) then
+            moveDir = moveDir - Vector3.new(0, 1, 0)
+        end
+
+        -- Mobile Thumbstick support fallback
+        if moveDir.Magnitude == 0 and h.MoveDirection.Magnitude > 0 then
+            local flat = h.MoveDirection
+            local forwardDot = flat:Dot((cam.CFrame.LookVector * Vector3.new(1, 0, 1)).Unit)
+            local rightDot = flat:Dot((cam.CFrame.RightVector * Vector3.new(1, 0, 1)).Unit)
+            moveDir = (cam.CFrame.LookVector * forwardDot) + (cam.CFrame.RightVector * rightDot)
+        end
+
+        if moveDir.Magnitude > 0 then
+            flyBodyVel.Velocity = moveDir.Unit * FlySpeed
+        else
+            flyBodyVel.Velocity = Vector3.zero
+        end
+
+        flyBodyGyro.CFrame = cam.CFrame
+    end)
+    table.insert(Hub.Connections, flyConn)
+end
+
+CreateToggle(PagePlayer, "Fly (บิน)", "🕊️", false, function(enabled)
+    FlyActive = enabled
+    if enabled then
+        StartFly()
+        Notify("Fly: ON (WASD + Space/Shift)", "🕊️", Color3.fromRGB(120, 240, 140))
+    else
+        StopFly()
+        Notify("Fly: OFF", "🕊️", Color3.fromRGB(255, 140, 140))
+    end
 end)
 
+CreateSlider(PagePlayer, "Fly Speed (ความเร็วบิน)", "⚡", 10, 250, 50, "", function(val)
+    FlySpeed = val
+end)
+
+CreateToggle(PagePlayer, "Noclip (เดินทะลุกำแพง)", "👻", false, function(enabled)
+    NoclipActive = enabled
+    if enabled then Notify("Noclip: ON", "👻", Color3.fromRGB(120, 240, 140)) end
+end)
+
+CreateSection(PagePlayer, "Stealth & Invisibility", "👁️‍🗨️")
+
+-- Invisibility Implementation (Ghost Transparencies & Name Tag Hide)
+local invisConn = nil
+local origTransparencies = {}
+local invisHighlight = nil
+
+local function DisableInvisibility()
+    if invisConn then
+        invisConn:Disconnect()
+        invisConn = nil
+    end
+    if invisHighlight then
+        pcall(function() invisHighlight:Destroy() end)
+        invisHighlight = nil
+    end
+    for part, origVal in pairs(origTransparencies) do
+        if part and part.Parent then
+            pcall(function()
+                if part:IsA("BasePart") or part:IsA("Decal") then
+                    part.Transparency = origVal
+                elseif part:IsA("BillboardGui") or part:IsA("ParticleEmitter") or part:IsA("Trail") or part:IsA("Beam") then
+                    part.Enabled = origVal
+                end
+            end)
+        end
+    end
+    origTransparencies = {}
+end
+
+local function EnableInvisibility()
+    local char = LocalPlayer.Character
+    if not char then return end
+
+    origTransparencies = {}
+    for _, part in ipairs(char:GetDescendants()) do
+        if part:IsA("BasePart") or part:IsA("Decal") then
+            origTransparencies[part] = part.Transparency
+            part.Transparency = 1
+        elseif part:IsA("BillboardGui") then
+            origTransparencies[part] = part.Enabled
+            part.Enabled = false
+        elseif part:IsA("ParticleEmitter") or part:IsA("Trail") or part:IsA("Beam") then
+            origTransparencies[part] = part.Enabled
+            part.Enabled = false
+        end
+    end
+
+    if not invisHighlight then
+        invisHighlight = Instance.new("Highlight")
+        invisHighlight.Name = "GunForgeHub_GhostInvis"
+        invisHighlight.FillColor = Color3.fromRGB(160, 200, 255)
+        invisHighlight.OutlineColor = Color3.fromRGB(220, 240, 255)
+        invisHighlight.FillTransparency = 0.88
+        invisHighlight.OutlineTransparency = 0.35
+        invisHighlight.Adornee = char
+        invisHighlight.Parent = char
+    end
+
+    if invisConn then invisConn:Disconnect() end
+    invisConn = RunService.Stepped:Connect(function()
+        if not InvisActive or not Hub.Active then return end
+        local c = LocalPlayer.Character
+        if not c then return end
+        for _, part in ipairs(c:GetDescendants()) do
+            if part:IsA("BasePart") and part.Transparency < 1 then
+                if not origTransparencies[part] then
+                    origTransparencies[part] = part.Transparency
+                end
+                part.Transparency = 1
+            elseif part:IsA("Decal") and part.Transparency < 1 then
+                if not origTransparencies[part] then
+                    origTransparencies[part] = part.Transparency
+                end
+                part.Transparency = 1
+            elseif (part:IsA("BillboardGui") or part:IsA("ParticleEmitter") or part:IsA("Trail") or part:IsA("Beam")) and part.Enabled then
+                if origTransparencies[part] == nil then
+                    origTransparencies[part] = true
+                end
+                part.Enabled = false
+            end
+        end
+    end)
+    table.insert(Hub.Connections, invisConn)
+end
+
+CreateToggle(PagePlayer, "Invisibility (หายตัว / ล่องหน)", "🌫️", false, function(enabled)
+    InvisActive = enabled
+    if enabled then
+        EnableInvisibility()
+        Notify("Invisibility: ON", "🌫️", Color3.fromRGB(120, 240, 140))
+    else
+        DisableInvisibility()
+        Notify("Invisibility: OFF", "🌫️", Color3.fromRGB(255, 140, 140))
+    end
+end)
+
+-- Register Cleanup
+table.insert(Hub.Cleanups, function()
+    StopFly()
+    DisableInvisibility()
+end)
+
+-- Global Connections for Player Mods
 table.insert(Hub.Connections, UserInputService.JumpRequest:Connect(function()
     if InfJumpActive then
         pcall(function()
@@ -1660,6 +1878,16 @@ table.insert(Hub.Connections, RunService.Stepped:Connect(function()
                 part.CanCollide = false
             end
         end
+    end
+end))
+
+table.insert(Hub.Connections, LocalPlayer.CharacterAdded:Connect(function(newChar)
+    task.wait(0.5)
+    if InvisActive then
+        EnableInvisibility()
+    end
+    if FlyActive then
+        StartFly()
     end
 end))
 
